@@ -1,0 +1,156 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements. See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: tikhub-gateway
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.6.15@sha256:7cf6622cb09b111289eed8a0cce3478e4f01d5048b0e0a1ed208299f3419334d
+    restart: unless-stopped
+    mem_limit: 512m
+    command:
+      - /usr/local/bin/etcd
+      - --name=tikhub-etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=tikhub-etcd=http://etcd:2380
+      - --initial-cluster-token=tikhub-gateway
+      - --initial-cluster-state=new
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
+      - --quota-backend-bytes=2147483648
+    volumes:
+      - etcd_data:/etcd-data
+    networks:
+      - gateway
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/etcdctl
+        - --endpoints=http://127.0.0.1:2379
+        - endpoint
+        - health
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  apisix:
+    image: apache/apisix:3.19.0-debian@sha256:5767cb637c584366bb932511d079ab87a38809ed7c5ce413e9a515ad85c8316f
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 768m
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:?Set APISIX_ADMIN_KEY in an external env file}
+      APISIX_DATA_ENCRYPTION_KEY: ${APISIX_DATA_ENCRYPTION_KEY:?Set APISIX_DATA_ENCRYPTION_KEY in an external env file}
+    configs:
+      - source: apisix_config
+        target: /usr/local/apisix/conf/config.yaml
+        mode: 0444
+    ports:
+      - "${APISIX_LISTEN_IP:-127.0.0.1}:9080:9080"
+      - "127.0.0.1:9180:9180"
+    networks:
+      - gateway
+    # The official image removes curl/wget. Use its existing Bash instead.
+    # This verifies the authenticated Admin API, including its etcd read path.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9180
+          printf 'GET /apisix/admin/routes HTTP/1.0\r\nHost: localhost\r\nX-API-KEY: %s\r\nConnection: close\r\n\r\n' "$${APISIX_ADMIN_KEY}" >&3
+          IFS= read -r -t 5 status <&3
+          case "$${status}" in
+            "HTTP/1.0 200 "*|"HTTP/1.1 200 "*) exit 0 ;;
+            *) exit 1 ;;
+          esac
+      interval: 15s
+      timeout: 8s
+      retries: 6
+      start_period: 40s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+configs:
+  apisix_config:
+    # Requires Docker Compose >= 2.23.1. No server-side YAML editing needed.
+    # $$ escapes Compose interpolation, leaving APISIX/NGINX references intact.
+    content: |
+      apisix:
+        node_listen: 9080
+        enable_ipv6: false
+        ssl:
+          enable: false
+        data_encryption:
+          enable_encrypt_fields: true
+          keyring:
+            - "$${{APISIX_DATA_ENCRYPTION_KEY}}"
+      nginx_config:
+        worker_processes: 1
+        error_log: /dev/stderr
+        error_log_level: warn
+        http:
+          access_log: /dev/stdout
+          access_log_format: '$$remote_addr [$$time_local] $$request_method $$uri $$status $$body_bytes_sent $$request_time'
+      deployment:
+        role: traditional
+        role_traditional:
+          config_provider: etcd
+        admin:
+          enable_admin_ui: true
+          enable_admin_cors: false
+          admin_listen:
+            ip: 0.0.0.0
+            port: 9180
+          allow_admin:
+            - 127.0.0.1/32
+            - ${TIKHUB_NETWORK_GATEWAY:-10.203.90.1}/32
+          admin_key:
+            - name: admin
+              key: "$${{APISIX_ADMIN_KEY}}"
+              role: admin
+        etcd:
+          host:
+            - http://etcd:2379
+          prefix: /apisix
+          timeout: 30
+
+networks:
+  gateway:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${TIKHUB_NETWORK_SUBNET:-10.203.90.0/24}
+          gateway: ${TIKHUB_NETWORK_GATEWAY:-10.203.90.1}
+
+volumes:
+  etcd_data:
