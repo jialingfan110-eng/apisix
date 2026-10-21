@@ -1,0 +1,17 @@
+<!--
+Licensed to the Apache Software Foundation (ASF) under one or more
+contributor license agreements. See the NOTICE file distributed with
+this work for additional information regarding copyright ownership.
+The ASF licenses this file to You under the Apache License, Version 2.0
+(the "License"); you may not use this file except in compliance with
+the License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+{% extends "base.html" %}{% block content %}<h1>今日用量</h1><p>{{ day }}（北京时间 00:00 至次日 00:00），按请求 ID 去重。</p><section class="card">{% for c in consumers %}<div class="usage-row"><div><strong>{{ c.display_name }}</strong><span class="muted"> {{ c.username }}</span></div><progress max="{{ maximum }}" value="{{ c.calls }}">{{ c.calls }}</progress><span>{{ c.calls }} 次</span></div>{% else %}<p>今日暂无调用记录。</p>{% endfor %}</section><p class="muted">日志异步写入，可能延迟数秒；极端故障可能少量丢失。</p>{% endblock %}
