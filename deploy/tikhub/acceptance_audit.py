@@ -1,7 +1,7 @@
 import sys,time,json,http.client,datetime
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent));import gatewayctl as g;import audit_ops as audit
-env=g.read_env('/etc/tikhub-gateway/stage1.env'); inv=g.Inventory('/etc/tikhub-gateway/consumers.json');state=inv.load();users=state['users'];a,b=g.TEST_USERS;admin=g.Admin(env['APISIX_ADMIN_KEY']);checks={}
+env=g.read_env('/etc/tikhub-gateway/stage1.env'); inv=g.Inventory('/etc/tikhub-gateway/consumer-store/consumers.json');state=inv.load();users=state['users'];a,b=g.TEST_USERS;admin=g.Admin(env['APISIX_ADMIN_KEY']);checks={}
 start=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 def req(path,who=None,body=None):
  c=http.client.HTTPConnection('127.0.0.1',9080,timeout=10);h={} if who is None else {'apikey':users[who]['key']};c.request('POST' if body else 'GET',path,body,h);r=c.getresponse();r.read();c.close();return r.status

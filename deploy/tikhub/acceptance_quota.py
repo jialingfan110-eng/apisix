@@ -16,7 +16,7 @@
 import sys,time,json,http.client
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent));import gatewayctl as g
-inv=g.Inventory('/etc/tikhub-gateway/consumers.json');state=inv.load();a,b=g.TEST_USERS;admin=g.Admin(g.read_env('/etc/tikhub-gateway/stage1.env')['APISIX_ADMIN_KEY'])
+inv=g.Inventory('/etc/tikhub-gateway/consumer-store/consumers.json');state=inv.load();a,b=g.TEST_USERS;admin=g.Admin(g.read_env('/etc/tikhub-gateway/stage1.env')['APISIX_ADMIN_KEY'])
 def req(who,path):
  c=http.client.HTTPConnection('127.0.0.1',9080,timeout=10);c.request('GET',path,headers={'apikey':state['users'][who]['key']});r=c.getresponse();r.read();c.close();return r.status
 for who in (a,b):state['users'][who]['quota']={'count':3,'time_window':60};g.apply_user(admin,who,state['users'][who])

@@ -56,7 +56,7 @@ def main():
     parser.add_argument('--authorized-followup-2026-10-21', action='store_true', dest='followup',
                         help='Use the single extra request explicitly authorized on 2026-10-21.')
     args = parser.parse_args()
-    state = gateway.Inventory('/etc/tikhub-gateway/consumers.json').load()
+    state = gateway.Inventory('/etc/tikhub-gateway/consumer-store/consumers.json').load()
     employees = [value for value in state['users'].values() if value['kind'] == 'employee' and value['enabled']]
     if not employees:
         raise gateway.GatewayError('No enabled employee available.')

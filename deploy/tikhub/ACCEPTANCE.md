@@ -20,3 +20,18 @@
 9080 以 IP+HTTP 发布，9180/8123 保持本机绑定。本机外网实测缺 key 返回 401；重建后三项服务 healthy，员工及日志数据保留，41 个原业务容器的 ID/启动时间均未变。不可依据“容器 healthy”认定所有网络或真实业务已验收。临时身份和模拟入口在收尾时清理，正常启动不带 acceptance profile。
 
 本方案不保证故障零丢日志，调用计数也不等同美元费用。正式切换仍需用户在 TikHub 后台撤销曾经直接发给同事的旧总 key，否则旧 key 可以绕过网关；本次不会自行更改 TikHub 账户凭据。
+
+
+## 2026-10-21 内部管理页验收
+
+入口 `http://118.196.147.13:8081`，admin + ADMIN_PASSWORD session 登录，不设 IP 白名单。APISIX 9080 继续处理业务，问卷服务 8080 保持原状。
+
+- 73 项本地测试通过（52 CLI/迁移/原有边界测试 + 21 网页测试，后者包含 8 组并发注销/过期场景）。
+- 远端真实 HTTP：匿名首页/用量/结果页跳转登录；错误密码拒绝；正确登录后首页与用量 200；临时身份创建、完整 key 仅展示一次、重复提交拒绝、停用/启用保持同 key、注销和容器重启使旧会话失效均通过。
+- 临时验收身份已清理，原两位员工的 key 和状态不变；TikHub 总 key 环境文件逐字节保持不变。未发起 TikHub 上游请求。
+- ClickHouse reader 实测 SELECT 成功、INSERT 因权限/readonly 被拒绝；不是用语法错误代替权限验收。`health --probe` 仅产生本地随机 404 并验证异步落库。
+- 管理容器 healthy，根文件系统只读，无 Docker socket、TikHub 总 key、ClickHouse 管理/写入密码。Admin 9180 与 ClickHouse 8123 仍只发布到宿主机 loopback。
+- APISIX、etcd、ClickHouse healthy，其他业务容器 ID 不变；构建产生并自动删除的临时容器不属于原业务。
+- 源码和有界运行日志按实际秘密值扫描，未发现泄露；密码、私有备份和员工清单不进入 Git。
+
+当前仍采用 HTTP。密码修改通过 `admin_setup.py --password-only` 后只重建 admin-web；后续 HTTPS 另行配置。

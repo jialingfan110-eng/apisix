@@ -18,9 +18,9 @@ APISIX 接收 `apikey: <个人子 key>`，去掉 `/tikhub` 前缀，以服务器
 | `validate_live_once.py` | 仅一次真实账户信息接口验收，持久化防重试记录 |
 | `test_gatewayctl.py` / `test_live_validation.py` | 管理边界、敏感配置及一次性请求记录测试 |
 
-真实密钥和员工清单分别在 `/etc/tikhub-gateway/stage1.env`、`/etc/tikhub-gateway/consumers.json`，目录 0700、文件 0600，均不进入 Git。环境文件名沿用阶段一。服务器 root / Docker 管理员属于可信管理边界，可读取容器环境。
+真实密钥和员工清单分别在 `/etc/tikhub-gateway/stage1.env`、`/etc/tikhub-gateway/consumer-store/consumers.json`（已有安装先运行下面的迁移命令），目录 0700、文件 0600，均不进入 Git。环境文件名沿用阶段一。服务器 root / Docker 管理员属于可信管理边界，可读取容器环境。
 
-固定镜像：APISIX 3.19.0、etcd 3.6.15、ClickHouse 25.8 LTS，Compose 同时固定 amd64 镜像摘要。Ubuntu 22.04/24.04 amd64、Docker Compose **≥2.23.1**（需要 `configs.content`）、Python **≥3.9**；本次实际服务器为 Ubuntu 24.04、Docker 29.1.3、Compose 2.40.3。
+固定镜像：APISIX 3.19.0、etcd 3.6.15、ClickHouse 25.8 LTS，Compose 同时固定 amd64 镜像摘要。Ubuntu 22.04/24.04 amd64、Docker Compose **≥2.30.0**（需要 `configs.content`）、Python **≥3.9**；本次实际服务器为 Ubuntu 24.04、Docker 29.1.3、Compose 2.40.3。
 
 资源上限：APISIX 768 MB、etcd 512 MB、ClickHouse 2 GB。建议至少 4 GB 可用内存并留足业务余量。网段默认 `10.203.90.0/24`；部署前检查现有 Docker 网络、路由与 9080/9180/8123 端口。可通过环境文件覆盖 `TIKHUB_NETWORK_SUBNET` / `TIKHUB_NETWORK_GATEWAY`。
 
@@ -169,3 +169,78 @@ ClickHouse 数据备份在维护窗口先停本项目 `clickhouse` 服务，对�
 变更从仓库提交、同步后部署；不在服务器手改 YAML、Lua 或 SQL。基础设施通过 Compose 编排，动态策略由仓库 CLI 调用 Admin API；员工清单是运行时数据。APISIX Dashboard 仅排查使用，正式策略变更回到 CLI/代码，避免配置漂移。
 
 官方参考：[APISIX Dashboard](https://apisix.apache.org/docs/apisix/dashboard/)、[key-auth](https://apisix.apache.org/docs/apisix/plugins/key-auth/)、[proxy-rewrite](https://apisix.apache.org/docs/apisix/plugins/proxy-rewrite/)、[limit-count](https://apisix.apache.org/docs/apisix/plugins/limit-count/)、[ClickHouse logger](https://apisix.apache.org/docs/apisix/plugins/clickhouse-logger/)、[TikHub 账户信息](https://docs.tikhub.io/186826050e0)、[官方 API 市场](https://user.tikhub.io/dashboard/api-marketplace)、[ClickHouse 25.8 LTS](https://clickhouse.com/blog/clickhouse-release-25-08)。
+
+
+## 内部管理网页（8081）
+
+管理页位于 `http://118.196.147.13:8081`，固定用户名 **admin**，密码由环境变量 **ADMIN_PASSWORD** 注入。未登录访问列表、创建、启停或用量均跳转 `/login`。本期不设 IP 白名单，不做多人角色系统；原问卷服务 8080 保持原状。
+
+页面支持姓名/飞书邮箱建档、子 key 前 8 位、创建时间、启停、今日用量及 CSS 柱状图。新 key 完整值只在创建后的结果页显示一次；刷新、返回或重新登录不再显示。请当场保存；确需找回时由可信 root 运维通过既有 `user-key` 交互命令处理。重启会使所有登录会话和待展示结果失效；它不会删除私有员工清单或轮换已发放的子 key。
+
+### 初始化和启动
+
+此功能需要 Docker Compose **≥2.30.0**（使用 `env_file.format: raw`，避免密码中的 `$`、`#`、引号被解释）。所有命令在本仓库 `deploy/tikhub/` 下由 root 执行；先确认 8081 和 `ADMIN_WEB_IP`（默认 `10.203.90.10`）空闲。
+
+```bash
+cd /opt/tikhub-gateway/deploy/tikhub
+# 仅已有旧清单安装需要迁移。先检查，再执行；自动保存 root 私有备份。
+python3 admin_migrate.py --dry-run
+python3 admin_migrate.py
+# 无回显设置 ADMIN_PASSWORD，两次输入；密码不出现在命令历史中。
+python3 admin_setup.py
+# 解析验证不输出密码；不执行完整 config 输出。
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile admin config --quiet
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile admin build admin-web
+# APISIX 静态配置新增管理容器地址 /32，首次必须重建使其生效。
+docker compose --env-file /etc/tikhub-gateway/stage1.env up -d --no-deps --force-recreate --wait apisix
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile admin up -d --no-deps --wait admin-web
+```
+
+本机无法直连 Docker Hub 时，先从官方仓库准备 Dockerfile 所固定摘要的 amd64 Python 基础镜像，核验 blob 和传输文件 SHA256 后 `docker image load`。本次缓存为 `/var/cache/tikhub-gateway/admin-python-amd64.oci.tar`，SHA256 `9010aa1c564fdf701a55476060c41b8d6eab3ab043a7e1af499822a9c5da8c97`。本次在既有 Docker 引擎使用以下离线基础镜像构建方式；pip 从官方 PyPI 下载固定版本依赖，不修改 Docker 全局设置：
+
+```bash
+DOCKER_BUILDKIT=0 docker build --pull=false -f admin-web/Dockerfile -t tikhub-admin-web:2026-10-21 .
+```
+
+`admin_setup.py --initialize-only` 仅预备凭据和只读账号，不设置网页密码；没有 `ADMIN_PASSWORD` 时网页拒绝启动。私有 `/etc/tikhub-gateway/admin.env` 含 `ADMIN_PASSWORD=...`；`web-cli.env` 只含 APISIX Admin key、容器内可信 URL 及 ClickHouse reader 密码。两个文件均 root:0600，不提交 Git、不打进镜像。已有 gateway 配置和总 key 保留在原 `stage1.env`，该文件不挂到管理容器里。无需修改主机防火墙、问卷配置或 Docker 全局配置。
+
+管理容器仅挂员工清单的专用目录和最小 CLI 凭据，根文件系统只读，去掉 capabilities，无 Docker socket。ClickHouse 的 `gateway_reader` 仅有 `SELECT ON tikhub.gateway_access`，通过持久 SQL 用户配置，不需重启 ClickHouse。APISIX 管理接口依旧仅在宿主机 127.0.0.1:9180 发布，容器桥接访问只新增专用管理容器 /32。
+
+默认管理员密码在环境变量中；root/Docker 管理员可读取，这是本项目可信边界。当前 HTTP 不加密浏览器与服务器之间的密码及 session，沿用用户本期选择；后续切 HTTPS 时更新 `ADMIN_ORIGIN`、允许 Host 并启用 Secure Cookie。不要将上游 TikHub 总 key 作为管理页密码。
+
+### 验证
+
+```bash
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile admin ps
+curl -s -o /dev/null -D - http://127.0.0.1:8081/
+# 预期 303、Location: /login；不应看到员工/key 信息。
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8081/login
+# 预期 200。再用浏览器输入 admin 和自己设置的密码。
+```
+
+浏览器确认首页现有人数正确、密码错误无法进入、用量页可查；可创建一个专用测试身份、只复制一次完整 key，再停用/启用。无需访问 TikHub 来验证管理功能。未被本 CLI 私有清单管理的 APISIX Consumer 在页面只读，不能被启停。停用人员仍在列表，可启用，保留历史统计。
+
+今日指北京时间当天零点到次日零点，使用 ClickHouse `received_at`、认证后的员工 ID、业务路径 `/tikhub/api/v1/`，按 `request_id` 去重。异步日志有数秒延迟，极端故障可能少量丢失。统计为调用次数，不是 TikHub 账单金额；数据源故障显示错误，不冒充 0 次。
+
+本地隔离测试（不调用远端及 TikHub）：
+
+```bash
+python3 -m unittest test_gatewayctl test_web_ops test_admin_setup test_live_validation -v
+python3 -m venv /tmp/tikhub-admin-tests
+/tmp/tikhub-admin-tests/bin/pip install -r admin-web/requirements.txt httpx==0.28.1
+cd admin-web
+/tmp/tikhub-admin-tests/bin/python -m unittest test_app -v
+```
+
+### 密码更换、停用与回退
+
+```bash
+cd /opt/tikhub-gateway/deploy/tikhub
+python3 admin_setup.py
+# 重建后旧会话全部失效，新密码从私有 env_file 注入。
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile admin up -d --no-deps --force-recreate --wait admin-web
+# 只关闭网页入口，业务 API 保持运行：
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile admin stop admin-web
+```
+
+回退到旧 CLI 前，先停网页，再执行 `python3 admin_migrate.py --rollback` 将最新清单回到旧路径（不是恢复陈旧备份），随后切回部署前代码。不要在新旧路径同时创建不同员工清单。私有备份仅用于故障恢复，不进入 Git。单独停止网页不会撤销已有员工 key；需要停用员工时用 CLI 或在网页停止前操作。

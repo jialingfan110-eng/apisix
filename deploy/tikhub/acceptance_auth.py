@@ -17,7 +17,7 @@ import sys,json,time,http.client
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import gatewayctl as g
-inv=g.Inventory('/etc/tikhub-gateway/consumers.json')
+inv=g.Inventory('/etc/tikhub-gateway/consumer-store/consumers.json')
 users=inv.load()['users']; admin=g.Admin(g.read_env('/etc/tikhub-gateway/stage1.env')['APISIX_ADMIN_KEY'])
 a,b=g.TEST_USERS; results={}
 def request(headers=(),path=g.AUTH_PATH):

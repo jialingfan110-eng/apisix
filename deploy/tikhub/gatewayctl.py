@@ -18,6 +18,7 @@
 
 import argparse
 import contextlib
+from datetime import datetime, timezone
 import fcntl
 import getpass
 import json
@@ -135,9 +136,19 @@ class Inventory:
 
 
 class Admin:
-    def __init__(self, key):
+    def __init__(self, key, base_url="http://127.0.0.1:9180/apisix/admin"):
         if not key:
             raise GatewayError("缺少网关管理密钥。")
+        try:
+            parsed = urllib.parse.urlsplit(base_url)
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.query or parsed.fragment):
+                raise ValueError
+            parsed.port
+        except ValueError:
+            raise GatewayError("Admin API 连接地址配置不合法。") from None
+        self.base_url = base_url.rstrip("/")
         self.key = key
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -146,7 +157,7 @@ class Admin:
             raise GatewayError("管理资源路径不合法。")
         payload = None if value is None else json.dumps(value).encode()
         request = urllib.request.Request(
-            "http://127.0.0.1:9180/apisix/admin" + path,
+            self.base_url + path,
             data=payload, method=method,
             headers={"X-API-KEY": self.key, "Content-Type": "application/json"},
         )
@@ -253,13 +264,14 @@ def audit_document():
 
 def new_user(display_name, kind="employee", count=100, window=60):
     return {"display_name": display_name, "kind": kind, "enabled": True,
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "key": secrets.token_urlsafe(32), "quota": {"count": count, "time_window": window}}
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default="/etc/tikhub-gateway/stage1.env")
-    parser.add_argument("--state", default="/etc/tikhub-gateway/consumers.json")
+    parser.add_argument("--state", default="/etc/tikhub-gateway/consumer-store/consumers.json")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init-tests")
     commands.add_parser("apply-users")
@@ -272,6 +284,11 @@ def parse_args(argv=None):
     health = commands.add_parser("health")
     health.add_argument("--probe", action="store_true")
     commands.add_parser("usage")
+    commands.add_parser("web-list")
+    commands.add_parser("web-usage")
+    web_add = commands.add_parser("web-create")
+    web_add.add_argument("name")
+    web_add.add_argument("--request-id", required=True)
     quota = commands.add_parser("user-quota")
     quota.add_argument("username")
     quota.add_argument("count", type=int)
@@ -304,7 +321,20 @@ def main(argv=None):
             print(user["key"])
             return
         env = read_env(args.env_file)
-        admin = Admin(env.get("APISIX_ADMIN_KEY"))
+        admin = Admin(env.get("APISIX_ADMIN_KEY"), env.get("APISIX_ADMIN_URL", "http://127.0.0.1:9180/apisix/admin"))
+        if args.command in ("web-list", "web-usage", "web-create"):
+            import web_ops
+            try:
+                if args.command == "web-create":
+                    result = web_ops.create_user(state, inventory, admin, args.name, args.request_id)
+                else:
+                    day, counts = web_ops.usage_counts(env)
+                    result = (web_ops.list_users(state, admin, counts, day, inventory)
+                              if args.command == "web-list" else web_ops.usage_rows(state, counts, day))
+                print(json.dumps(result, ensure_ascii=False))
+            except RuntimeError as exc:
+                raise GatewayError(str(exc)) from None
+            return
         if args.command in ("health", "usage", "init-audit"):
             import audit_ops
             try:
@@ -372,6 +402,16 @@ def main(argv=None):
             username = valid_id(args.username)
             if username not in users:
                 raise GatewayError("员工内部标识不存在。")
+            if not users[username].get("created_at"):
+                # Remember original APISIX creation before disable removes it;
+                # enabling later must not turn the re-created resource time
+                # into the employee's original creation date.
+                import web_ops
+                existing = admin.request("GET", "/consumers/" + username, missing_ok=True)
+                if existing:
+                    original_time = web_ops.creation_time(existing.get("value", {}).get("create_time"))
+                    if original_time:
+                        users[username]["created_at"] = original_time
             if args.command == "user-quota":
                 if not (1 <= args.count <= 1000000 and 1 <= args.window <= 86400):
                     raise GatewayError("次数范围 1～1000000，窗口范围 1～86400 秒。")
@@ -386,6 +426,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # web_ops reuses these classes/functions. Alias the script module so its
+    # exception classes retain identity when run through the production CLI.
+    sys.modules.setdefault("gatewayctl", sys.modules[__name__])
     try:
         main()
     except (GatewayError, OSError, ValueError) as exc:

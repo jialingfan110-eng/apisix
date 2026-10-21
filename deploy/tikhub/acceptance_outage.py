@@ -1,7 +1,7 @@
 import sys,subprocess,http.client,time,json
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent));import gatewayctl as g;import audit_ops as audit
-env=g.read_env('/etc/tikhub-gateway/stage1.env');u=g.Inventory('/etc/tikhub-gateway/consumers.json').load()['users'][g.TEST_USERS[1]]
+env=g.read_env('/etc/tikhub-gateway/stage1.env');u=g.Inventory('/etc/tikhub-gateway/consumer-store/consumers.json').load()['users'][g.TEST_USERS[1]]
 base=['docker','compose','--env-file','/etc/tikhub-gateway/stage1.env'];kw={'cwd':str(Path(__file__).resolve().parent),'stdout':subprocess.DEVNULL,'stderr':subprocess.DEVNULL}
 subprocess.run(base+['stop','clickhouse'],check=True,timeout=60,**kw)
 try:

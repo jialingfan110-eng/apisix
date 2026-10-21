@@ -137,6 +137,58 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
+  admin-web:
+    profiles: [admin]
+    image: tikhub-admin-web:2026-10-21
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: admin-web/Dockerfile
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file:
+      - path: ${ADMIN_ENV_FILE:-/etc/tikhub-gateway/admin.env}
+        required: false
+        format: raw
+    environment:
+      ADMIN_ALLOWED_HOSTS: ${ADMIN_ALLOWED_HOSTS:-118.196.147.13,localhost,127.0.0.1}
+      ADMIN_ORIGIN: ${ADMIN_ORIGIN:-http://118.196.147.13:8081}
+      GATEWAY_CTL: /app/gatewayctl.py
+      GATEWAY_ENV_FILE: /run/secrets/web-cli.env
+      GATEWAY_STATE: /private/consumers.json
+    volumes:
+      - type: bind
+        source: ${ADMIN_CLI_ENV_FILE:-/etc/tikhub-gateway/web-cli.env}
+        target: /run/secrets/web-cli.env
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${CONSUMER_STORE_DIR:-/etc/tikhub-gateway/consumer-store}
+        target: /private
+        bind: {create_host_path: false}
+    ports: ["0.0.0.0:8081:8080"]
+    networks:
+      gateway:
+        ipv4_address: ${ADMIN_WEB_IP:-10.203.90.10}
+    depends_on:
+      apisix: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8080/login',timeout=3); assert r.status == 200"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15s
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
   mock:
     image: apache/apisix:3.19.0-debian@sha256:5767cb637c584366bb932511d079ab87a38809ed7c5ce413e9a515ad85c8316f
     platform: linux/amd64
@@ -202,6 +254,7 @@ configs:
           allow_admin:
             - 127.0.0.1/32
             - ${TIKHUB_NETWORK_GATEWAY:-10.203.90.1}/32
+            - ${ADMIN_WEB_IP:-10.203.90.10}/32
           admin_key:
             - name: admin
               key: "$${{APISIX_ADMIN_KEY}}"

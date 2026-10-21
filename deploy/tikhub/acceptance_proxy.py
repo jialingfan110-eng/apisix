@@ -17,7 +17,7 @@ import sys,json,time,http.client,base64
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import gatewayctl as g
-u=g.Inventory('/etc/tikhub-gateway/consumers.json').load()['users'][g.TEST_USERS[0]];checks={}
+u=g.Inventory('/etc/tikhub-gateway/consumer-store/consumers.json').load()['users'][g.TEST_USERS[0]];checks={}
 def req(method,path,body=b'',headers=None):
  c=http.client.HTTPConnection('127.0.0.1',9080,timeout=15)
  h={'apikey':u['key'],'Content-Type':'application/octet-stream','Authorization':'Bearer supplied-fake','X-Consumer-Username':'spoof'}
