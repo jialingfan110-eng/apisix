@@ -236,7 +236,7 @@ cd admin-web
 
 ```bash
 cd /opt/tikhub-gateway/deploy/tikhub
-python3 admin_setup.py
+python3 admin_setup.py --password-only
 # 重建后旧会话全部失效，新密码从私有 env_file 注入。
 docker compose --env-file /etc/tikhub-gateway/stage1.env --profile admin up -d --no-deps --force-recreate --wait admin-web
 # 只关闭网页入口，业务 API 保持运行：
