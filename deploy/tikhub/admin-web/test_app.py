@@ -114,13 +114,35 @@ class AppTests(unittest.TestCase):
 
     def test_login_csrf_origin_and_backoff(self):
         page = self.client.get("/login")
+        self.assertEqual(page.headers["referrer-policy"], "same-origin")
         data = {"username": "admin", "password": "wrong", "csrf": hidden(page, "csrf")}
         self.assertEqual(self.client.post("/login", data=data).status_code, 403)
+        self.assertEqual(self.client.post("/login", data=data, headers={"Origin": "null"}).status_code, 403)
         self.assertEqual(self.client.post("/login", data=data, headers={"Origin": "http://evil.test"}).status_code, 403)
         for _ in range(10):
             self.assertEqual(self.post("/login", data).status_code, 401)
         # Spoofed forwarded IP cannot reset the limit.
         self.assertEqual(self.client.post("/login", data=data, headers={"Origin": "http://testserver", "X-Forwarded-For": "1.2.3.4"}).status_code, 429)
+
+    def test_browser_icon_fetch_preserves_login_form(self):
+        page = self.client.get("/login")
+        cookie = self.client.cookies[LOGIN_COOKIE]
+        token_count = len(self.app.state.login_tokens)
+        for method in ("get", "head"):
+            response = getattr(self.client, method)("/favicon.ico")
+            self.assertEqual(response.status_code, 204)
+            self.assertNotIn("location", response.headers)
+            self.assertNotIn("set-cookie", response.headers)
+            self.assertEqual(response.headers["referrer-policy"], "same-origin")
+        self.assertEqual(self.client.post("/favicon.ico").status_code, 405)
+        self.assertEqual(self.client.get("/favicon.ico", headers={"Host": "evil.test"}).status_code, 400)
+        self.assertEqual(self.client.cookies[LOGIN_COOKIE], cookie)
+        self.assertEqual(len(self.app.state.login_tokens), token_count)
+        self.assertEqual(self.backend.calls, [])
+        response = self.client.post("/login", data={"username": "admin", "password": "test-password-only",
+            "csrf": hidden(page, "csrf")}, headers={"Origin": "http://testserver"})
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.client.get("/").status_code, 200)
 
     def test_host_checked_even_anonymous_and_xff_not_trusted(self):
         self.assertEqual(self.client.get("/", headers={"Host": "evil.test"}).status_code, 400)

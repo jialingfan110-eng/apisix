@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -159,6 +159,10 @@ def create_app(backend=None, environ=None):
             host = None
         if host is None or host.lower() not in allowed_hosts:
             response = HTMLResponse("无效访问地址", status_code=400)
+        elif request.url.path == "/favicon.ico":
+            # Browser icon requests must not rotate the login form's cookie.
+            response = (Response(status_code=204) if request.method in ("GET", "HEAD")
+                        else Response(status_code=405, headers={"Allow": "GET, HEAD"}))
         elif request.url.path not in ("/login",) and not request.url.path.startswith("/static/") and not session(request):
             response = RedirectResponse("/login", status_code=303)
         else:
@@ -176,7 +180,9 @@ def create_app(backend=None, environ=None):
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # Native form POSTs need their same-origin Origin header for CSRF checks.
+        # Cross-origin requests still receive no Referer under this policy.
+        response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
         return response
 
