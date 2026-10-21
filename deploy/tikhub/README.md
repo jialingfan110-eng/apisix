@@ -1,193 +1,171 @@
-# TikHub 统一网关：阶段一
+# TikHub 统一网关
 
-本阶段只启动 APISIX + etcd，验证网关基础环境。**没有 TikHub 路由、Consumer、限流或 ClickHouse，也不需要 TikHub 总 key。** 根路径返回 404 是预期结果，不能据此认定 TikHub 业务已经接入。
+APISIX 接收 `apikey: <个人子 key>`，去掉 `/tikhub` 前缀，以服务器注入的 `Authorization: Bearer <总 key>` 调用 `https://api.tikhub.io`。方法、Query、请求体、上游状态和响应体透传。ClickHouse 异步记录调用审计。
 
-目录只有两个文件：`docker-compose.yml`（含必要启动配置）和本 README。修改 Compose 后通过 Git 管理和部署，不在服务器上另建、手改 APISIX YAML。
+本期包含个人建档、停用、轮换、按人计数限流及审计；飞书多维表格接入和自服务门户留待后续。员工姓名保存在服务器私有清单，APISIX 使用稳定内部 ID；以后改名无需重建 key，同名人员需运维指定不同内部 ID。
 
-## 部署内容
+## 文件与边界
 
-| 项目 | 设置 |
+| 文件 | 用途 |
 | --- | --- |
-| APISIX | 官方 `apache/apisix:3.19.0-debian`，同时固定镜像摘要 |
-| 配置存储 | 官方 `quay.io/coreos/etcd:v3.6.15`，同时固定镜像摘要 |
-| 目标平台 | Ubuntu 22.04 / 24.04，Linux amd64（按本次实际服务器固定架构） |
-| Compose | **v2.23.1 或更高的 v2 版本**，使用 `configs.content` 保存启动配置 |
-| 9080 | 阶段一默认仅绑定服务器 `127.0.0.1`，尚未开放同事调用 |
-| 9180 | 仅绑定服务器 `127.0.0.1`，有独立 Admin key 和 IP 白名单 |
-| etcd 2379 / 2380 | 仅容器网络，未映射到宿主机 |
-| 持久化 | 命名卷 `tikhub-gateway_etcd_data` 保存网关配置 |
-| 日志 | Docker JSON 日志，每个容器最多 3 × 10 MB；访问日志不含 Query、请求头或请求体 |
-| 网络 | 默认 `10.203.90.0/24`，网关 `10.203.90.1`；部署前检查与现有网络不冲突 |
-| 内存上限 | APISIX 768 MB、etcd 512 MB，避免挤占同机其他业务 |
+| `docker-compose.yml` | APISIX、etcd、ClickHouse 和可选模拟服务编排；APISIX 启动 YAML 内嵌于 Compose |
+| `gatewayctl.py` | Consumer、路由、限额、审计及密钥领取命令 |
+| `init_secrets.py` | 初始化基础设施密钥，重复运行保留已有值 |
+| `receive_tikhub_key.py` | 在交互终端无回显接收 TikHub 总 key |
+| `audit_ops.py` | ClickHouse 查询、用量及异步探针 |
+| `clickhouse.sql` / `clickhouse*.xml` | 表结构、30 天保留期、插入专用账号和资源配置 |
+| `mock.conf` / `acceptance_*.py` | 隔离模拟及阶段验收，不调用 TikHub |
+| `validate_live_once.py` | 仅一次真实账户信息接口验收，持久化防重试记录 |
+| `test_gatewayctl.py` / `test_live_validation.py` | 管理边界、敏感配置及一次性请求记录测试 |
 
-APISIX 镜像本身不包含 curl/wget，因此健康检查使用镜像已有的 Bash 发出本地请求，检查带认证的 Admin API 能否读取路由。etcd 单独执行 `endpoint health`。
+真实密钥和员工清单分别在 `/etc/tikhub-gateway/stage1.env`、`/etc/tikhub-gateway/consumers.json`，目录 0700、文件 0600，均不进入 Git。环境文件名沿用阶段一。服务器 root / Docker 管理员属于可信管理边界，可读取容器环境。
 
-## 1. 部署前检查
+固定镜像：APISIX 3.19.0、etcd 3.6.15、ClickHouse 25.8 LTS，Compose 同时固定 amd64 镜像摘要。Ubuntu 22.04/24.04 amd64、Docker Compose **≥2.23.1**（需要 `configs.content`）、Python **≥3.9**；本次实际服务器为 Ubuntu 24.04、Docker 29.1.3、Compose 2.40.3。
 
-以下命令在服务器执行；当前用户需有 Docker 权限和 sudo 权限，root 用户可直接执行。
+资源上限：APISIX 768 MB、etcd 512 MB、ClickHouse 2 GB。建议至少 4 GB 可用内存并留足业务余量。网段默认 `10.203.90.0/24`；部署前检查现有 Docker 网络、路由与 9080/9180/8123 端口。可通过环境文件覆盖 `TIKHUB_NETWORK_SUBNET` / `TIKHUB_NETWORK_GATEWAY`。
 
-```bash
-uname -m
-docker --version
-docker compose version
-command -v openssl
-command -v curl
-df -h /var/lib/docker
-free -h
-ss -lntp '( sport = :9080 or sport = :9180 )'
-docker network ls
-ip -4 route
-```
+## 阶段一：启动基础设施
 
-确认两个端口未被其他服务占用，Docker 服务正常，Compose 版本满足要求，磁盘有镜像与 etcd 数据的可用空间。建议基础环境至少 2 vCPU、2 GB 内存；这不包含后续 ClickHouse 的资源需求。
-
-如果服务器已有同名 Compose 项目或数据卷，先确认所属业务，不能覆盖。若默认网段冲突，选择空闲网段，并在下文的外部环境文件中同时设置 `TIKHUB_NETWORK_SUBNET` 和 `TIKHUB_NETWORK_GATEWAY`；无需改服务器上的 YAML。
-
-## 2. 放置仓库
-
-在服务器上获取你的 Fork，或将本阶段的两个文件放入已有仓库的 `deploy/tikhub/`。以下以仓库根目录 `/opt/tikhub-gateway` 为例：
+以下在服务器仓库 `deploy/tikhub/` 执行，需 root 或 sudo。新环境先获取本仓库：
 
 ```bash
 git clone https://github.com/jialingfan110-eng/apisix.git /opt/tikhub-gateway
 cd /opt/tikhub-gateway/deploy/tikhub
+python3 init_secrets.py
+docker compose --env-file /etc/tikhub-gateway/stage1.env config --quiet
+docker compose --env-file /etc/tikhub-gateway/stage1.env pull
+docker compose --env-file /etc/tikhub-gateway/stage1.env up -d --wait --wait-timeout 180
+docker compose --env-file /etc/tikhub-gateway/stage1.env ps
 ```
 
-若本次变更尚未推送到 Fork，需要先将这两个文件从本地工作副本同步到上述目录；只有上游代码的 checkout 不包含本阶段部署文件。
-
-## 3. 生成服务器专用密钥
-
-密钥文件放在 Git 仓库之外：`/etc/tikhub-gateway/stage1.env`，目录权限 0700、文件权限 0600。不要粘贴已有 TikHub 总 key，也不要把密钥文件提交到 Git。
-
-下面的初始化重复执行会保留已有文件，不会偷偷轮换密钥：
+预期三项服务 healthy；初次空 etcd 尚无业务路由，9080 返回 404。Admin 9180 仅宿主机 127.0.0.1，缺管理 key 返回 401；etcd 不发布端口；ClickHouse 8123 仅 127.0.0.1 和私有容器网络。Dashboard 经 SSH 转发访问，管理 API 仍需独立 Admin key。
 
 ```bash
-sudo install -d -m 0700 /etc/tikhub-gateway
-sudo sh -eu -c '
-  if [ -e /etc/tikhub-gateway/stage1.env ]; then
-    printf "%s\n" "已有密钥文件，保留原值。"
-    exit 0
-  fi
-  umask 077
-  admin_key="$(openssl rand -hex 32)"
-  encryption_key="$(openssl rand -hex 16)"
-  test "${#admin_key}" -eq 64
-  test "${#encryption_key}" -eq 32
-  printf "APISIX_ADMIN_KEY=%s\nAPISIX_DATA_ENCRYPTION_KEY=%s\n" \
-    "$admin_key" "$encryption_key" > /etc/tikhub-gateway/stage1.env
-'
+ssh -N -L 19180:127.0.0.1:9180 root@服务器IP
+# 本机浏览器打开 http://127.0.0.1:19180/ui/
 ```
 
-Admin key 用于管理网关，数据加密 key 用于后续敏感配置字段，两者均不是 TikHub 总 key 或同事子 key。请将环境文件安全备份；后续存入 Consumer 后不要直接替换数据加密 key。
+总 key 尚未录入时，APISIX 可以启动，但 `apply-live` 拒绝创建真实路由。不要输出完整 `docker compose config`、容器 environment、环境文件或启用 shell `set -x`。
 
-环境变量对服务器 root 和 Docker 管理员可见。本方案隔离的是同事的业务调用权限，并不对可信服务器管理员隐藏密钥。不要运行或分享会展开密钥的 `docker compose config` 完整输出、`docker inspect` 环境信息或 shell 调试跟踪。
+### 本次离线镜像缓存
 
-## 4. 校验、拉取、启动
+服务器无法直连 Docker Hub，公开镜像从官方仓库在本机下载，逐 blob 验证 SHA256 后通过 SSH 导入；未修改 Docker 全局配置或使用第三方镜像源。缓存位于 `/var/cache/tikhub-gateway/`：
 
-```bash
-cd /opt/tikhub-gateway/deploy/tikhub
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env config --quiet
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env pull
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env up -d --wait --wait-timeout 180
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env ps
-```
-
-预期 etcd、apisix 都为 `healthy`。`config --quiet` 只检查结构，不输出密钥；它通过不代表容器或真实服务已启动。`up --wait` 超时后不能继续业务阶段，应先查故障。
-
-### 本次服务器的离线镜像方式
-
-本次服务器无法直连 Docker Hub，但可访问 Quay。etcd 从官方 Quay 拉取；APISIX 从官方 Docker Hub 在本机获取、核对原始索引与 amd64 镜像摘要后，经 SSH 传入服务器。没有配置第三方镜像源或修改 Docker 全局设置。
-
-服务器保留的导入包为 `/var/cache/tikhub-gateway/apisix-3.19.0-amd64.oci.tar`，SHA256 为 `73a6246607da3668f54cd381dd4abf4e4e4ba781c295a7817cf33bd15a7de860`。这是公开镜像的运维缓存，不是密钥文件，也不提交到 Git。需要重新导入时：
-
-```bash
-printf '%s  %s\n' \
-  73a6246607da3668f54cd381dd4abf4e4e4ba781c295a7817cf33bd15a7de860 \
-  /var/cache/tikhub-gateway/apisix-3.19.0-amd64.oci.tar | sha256sum --check
-sudo docker image load --input /var/cache/tikhub-gateway/apisix-3.19.0-amd64.oci.tar
-sudo docker image inspect \
-  apache/apisix:3.19.0-debian@sha256:5767cb637c584366bb932511d079ab87a38809ed7c5ce413e9a515ad85c8316f \
-  --format '{{.Id}}'
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env pull etcd
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env up -d --pull never --wait --wait-timeout 180
-```
-
-`inspect` 必须能按 Compose 中的完整摘要找到本地镜像。新服务器如果没有这个缓存包，应从官方镜像仓库获取同一摘要的镜像或重新准备经过摘要验证的离线包，不能只下载同名标签后跳过摘要校验。
-
-## 5. 验收
-
-### 网关和管理边界
-
-在服务器执行：
-
-```bash
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9080/
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9180/apisix/admin/routes
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9180/ui/
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env exec -T etcd \
-  /usr/local/bin/etcdctl --endpoints=http://127.0.0.1:2379 endpoint health
-```
-
-预期依次为：**404**、**401**、**200（或跳转后 200）**、**is healthy**。Dashboard 静态页面可访问不代表管理 API 无需认证，缺 key 的管理请求必须被拒绝。
-
-健康检查已使用正确 Admin key 读取路由。若要手动确认路由数，可执行下面命令；只打印条数，不打印密钥或配置内容：
-
-```bash
-sudo sh -eu -c '
-  . /etc/tikhub-gateway/stage1.env
-  printf "header = \"X-API-KEY: %s\"\n" "$APISIX_ADMIN_KEY" |
-    curl --config - --fail --silent --show-error http://127.0.0.1:9180/apisix/admin/routes
-' | python3 -c 'import json,sys; data=json.load(sys.stdin); print("route_count:", data["total"])'
-```
-
-全新部署的预期结果为 `route_count: 0`。本阶段不通过 Admin API 创建测试路由。
-
-### 重建与持久化
-
-下面只重建本项目容器，保留 etcd 数据卷及密钥：
-
-```bash
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env down
-sudo docker volume inspect tikhub-gateway_etcd_data --format '{{.Name}}'
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env up -d --wait --wait-timeout 180
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env ps
-```
-
-预期数据卷仍存在，两个服务恢复 healthy。阶段一没有业务配置，这项验收仅验证卷保留和容器恢复；后续有 Consumer、路由后还需验证业务配置持久化。**不要加 `down -v`，那会删除配置数据。**
-
-### 从自己的电脑查看
-
-默认不把业务端口开放到公网。若要从电脑访问，可以建立 SSH 转发：
-
-```bash
-ssh -N -L 19080:127.0.0.1:9080 -L 19180:127.0.0.1:9180 root@服务器IP
-```
-
-访问 `http://127.0.0.1:19080/`，预期 404；Dashboard 地址为 `http://127.0.0.1:19180/ui/`。后续开放同事调用时才设置 `APISIX_LISTEN_IP`、限制公司出口 IP；9180 始终保持本机绑定，不开放公网。
-
-## 6. 排查与停止
-
-```bash
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env ps
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env logs --tail=100 apisix etcd
-sudo docker compose --env-file /etc/tikhub-gateway/stage1.env stop
-```
-
-| 现象 | 处理 |
+| 文件 | SHA256 |
 | --- | --- |
-| `configs.content` 不支持 | 升级至 Compose v2.23.1 或更高的 v2 版本，再重新校验；不要临时拆文件绕过 |
-| 缺少环境变量 | 检查 `--env-file` 参数和密钥文件是否存在，不要复制真实 key 到 Compose |
-| 镜像拉取失败 | 检查服务器 DNS、到 Docker Hub / Quay 的连通性；不要换成未知第三方镜像 |
-| 网段重叠 | 选择无冲突网段，在外部环境文件同时设置 subnet 和 gateway，再重建本项目网络 |
-| 管理请求返回 403 | 记录访问来源与 Docker 网络信息，检查网关地址配置；不要放宽为 `0.0.0.0/0` |
-| apisix unhealthy | 检查 etcd 健康、密钥配置、只读配置挂载及端口占用；不继续接入业务 |
-| 9080 返回 404 | 阶段一尚无路由，这是正常结果 |
+| `apisix-3.19.0-amd64.oci.tar` | `73a6246607da3668f54cd381dd4abf4e4e4ba781c295a7817cf33bd15a7de860` |
+| `clickhouse-25.8-amd64.oci.tar` | `9663158d91f5802e01e676e439b04db7920fb69ac9541a0ace803922f232abe6` |
 
-日志可能包含运行环境信息，排查时只提供必要片段，不提供环境文件、密码、完整请求或完整管理配置。
+恢复镜像先用 `sha256sum` 核对上述值，再 `docker image load --input <缓存绝对路径>`。使用 `docker image inspect <Compose 中带摘要的完整镜像引用> --format '{{.Id}}'` 确认能按摘要找到镜像，随后 `up -d --pull never --wait`。新服务器需自行准备相同摘要的官方镜像；缓存不随 Git 提交。
 
-回退阶段一可执行上面的 `stop`，或使用不带 `-v` 的 `down`；保留仓库文件、密钥文件及 etcd 命名卷。
+## 阶段二：员工与子 key
 
-## 验收后的下一步
+```bash
+python3 gatewayctl.py person-add '同事飞书姓名'
+python3 gatewayctl.py users
+```
 
-由你确认阶段一验收结果后，才开始阶段二的工号 Consumer 和个人子 key。TikHub 总 key、真实付费调用、限流与 ClickHouse 都在后续阶段逐项接入。
+创建后输出稳定 `emp_...` ID；姓名和随机子 key 仅写入私有清单。默认每人每 60 秒 100 次，可在下一节调整。重复姓名默认拒绝，确有同名人员应使用区分后的显示名并指定 `--username emp_独立标识`。姓名不是认证凭据。
 
-官方参考：[APISIX 3.19.0](https://github.com/apache/apisix/releases/tag/3.19.0)、[Dashboard](https://apisix.apache.org/docs/apisix/dashboard/)、[APISIX Docker 源码](https://github.com/apache/apisix-docker)、[etcd 3.6.15](https://github.com/etcd-io/etcd/releases/tag/v3.6.15)、[Compose configs](https://docs.docker.com/reference/compose-file/configs/)。
+在本人操作的 SSH 终端领取 key（自动化、重定向或管道输出被拒绝）：
+
+```bash
+python3 gatewayctl.py user-key emp_替换为实际ID
+python3 gatewayctl.py user-disable emp_替换为实际ID
+python3 gatewayctl.py user-enable emp_替换为实际ID
+python3 gatewayctl.py user-rotate emp_替换为实际ID
+```
+
+轮换后重新领取，旧 key 失效。禁用会删除该 Consumer，私有清单保留记录便于恢复。配置经 etcd 异步传到工作进程，需等待数秒后验收。若管理 API 调用失败，清单先保留期望状态；恢复后执行 `python3 gatewayctl.py apply-users`。
+
+鉴权只接受单个、非空 `apikey` header；Query-only、Bearer-only、错误 key、重复 header 都拒绝。Query 中本来就有的 `apikey` 参数作为业务参数保留，不参与认证。客户端伪造的员工身份头被清除。
+
+## 阶段三：安全录入与透传
+
+在交互式 SSH 终端执行，提示后粘贴总 key 并回车，屏幕不回显，不进入 shell 历史：
+
+```bash
+python3 receive_tikhub_key.py
+docker compose --env-file /etc/tikhub-gateway/stage1.env up -d --pull never --force-recreate --wait --wait-timeout 180 apisix
+python3 gatewayctl.py apply-live
+```
+
+`apply-live` 不发起上游请求。总 key 通过 Compose environment 注入，路由只存 `$ENV://TIKHUB_AUTHORIZATION` 引用。NGINX 启动时全局启用上游证书校验、载入系统 CA，校验深度为 5；上游 HTTPS 使用正确 Host/SNI；业务重试次数为 **0**，避免付费调用被自动重复。再次录入总 key 后需重建 APISIX 使新环境生效。
+
+同事请求地址：`http://服务器IP:9080/tikhub/api/v1/...`。使用 `apikey` header，具体方法、参数和请求体按 TikHub 官方接口文档。HTTP 不加密网络传输，这是本期明确选择；9080 供业务调用，9180/8123 保持本机绑定。
+
+`validate_live_once.py` 是本次授权验收工具，只调用 `/api/v1/tikhub/user/get_user_info` 一次。2026-10-20 官方 API 市场列价 $0.0000/请求，授权上限 $0.50。执行前再次核对官方价格；该脚本不适合作为定时健康检查。它在发请求前创建私有 `real-validation.json`，失败或超时也不自动重试，禁止删除记录来绕过次数限制；响应正文、邮箱、余额均不打印。2026-10-21 用户另行授权 TLS 修复后的 1 次重验，使用显式参数 `--authorized-followup-2026-10-21`，额外记录保存在 `real-validation-authorized-20261021.json`，原始记录保持不变。此次额外授权已经使用并通过；重复执行该参数也不会再发请求。
+
+## 阶段四：按人计数限流
+
+```bash
+python3 gatewayctl.py user-quota emp_替换为实际ID 100 60
+```
+
+即每 60 秒最多 100 次，超额返回 429。相同员工跨路由共享，其他员工独立，`policy=local`，不依赖 Redis。次数按尝试计算，上游失败也计入；它不是美元预算或真实账单。改限额会切换计数组，重启进程会清空本地计数；切回仍未过期的旧组可能沿用旧计数。避免用反复更新策略当作配额重置工具。
+
+## 阶段五：异步审计
+
+```bash
+python3 gatewayctl.py init-audit
+python3 gatewayctl.py apply-audit
+python3 gatewayctl.py health --probe
+python3 gatewayctl.py usage
+```
+
+全局审计包含匹配及未匹配请求、401、429和上游失败。字段限定为请求 ID、内部员工 ID、方法、路径（无 Query）、网关及上游状态、耗时、时间、路由 ID；鉴权失败没有员工 ID。请求头、Query、请求体、响应体及姓名均不采集。`usage` 在服务器查询最近 24 小时，再用私有清单映射显示名；它输出调用次数，不能视为 TikHub 实际金额。
+
+ClickHouse 命名卷保存日志，表 `tikhub.gateway_access`，按接收时间保留 30 天（TTL 合并异步清理，非逐秒删除）。`gateway_writer` 只有 INSERT 权限，只允许本项目网段；管理查询使用独立 `gateway_admin`。密码由外部 env 提供。
+
+日志批次最多 100 条，空闲约 2 秒或缓冲约 5 秒发送，HTTP 超时 2 秒，最多重试 3 次、重试间隔 1 秒，内存待处理上限 8192 条。ClickHouse 故障不阻断业务；重试耗尽、缓冲满、进程崩溃或强制重启可能丢日志，网络不确定性下重试可能重复，不能承诺零丢失或恰好一次。聚合可按 request_id 辅助去重。
+
+### 健康与告警接入
+
+`health --probe` 不请求 TikHub：向网关发送无凭据、随机路径的 404 请求，然后最多等待 20 秒确认异步落库。成功退出 0，ClickHouse 不可用或未落库退出非 0。可由现有监控系统每分钟执行并对连续失败告警；本次不另行注册通知账号或新定时任务。
+
+排障限量读取：
+
+```bash
+docker compose --env-file /etc/tikhub-gateway/stage1.env ps
+docker compose --env-file /etc/tikhub-gateway/stage1.env logs --since=5m --tail=100 apisix clickhouse
+```
+
+关注 `clickhouse-logger`、`failed to connect`、`server returned status code`、重试失败、待处理条目丢弃等错误。日志含环境信息，分享前只截取必要片段；不要分享密钥文件或完整管理配置。容器 JSON 日志有轮转上限。
+
+## 隔离验收与阶段六收尾
+
+以下仅在受控运维窗口执行。会建立两个临时测试身份和入口，全部真实连通性测试仍单独受一次额度限制：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile acceptance up -d --pull never --wait
+python3 gatewayctl.py init-tests
+python3 gatewayctl.py apply-mock
+python3 acceptance_auth.py
+python3 acceptance_proxy.py
+python3 acceptance_quota.py
+python3 acceptance_audit.py
+# 维护窗口可选：python3 acceptance_outage.py（短暂停止本项目 ClickHouse）
+python3 gatewayctl.py health --probe
+python3 gatewayctl.py cleanup-tests
+docker compose --env-file /etc/tikhub-gateway/stage1.env --profile acceptance stop mock
+```
+
+验收脚本不打印 key；鉴权验收会轮换测试 key，配额验收使用 3 次小额度后恢复默认。失败后先 `apply-users` 恢复清单期望状态，检查原因，再执行清理。测试入口只允许测试身份；正常运行不启动 `acceptance` profile。
+
+重建仅限本项目，保留持久卷：
+
+```bash
+docker compose --env-file /etc/tikhub-gateway/stage1.env up -d --pull never --force-recreate --wait --wait-timeout 180
+python3 gatewayctl.py health --probe
+```
+
+不要使用 `down -v`。私有环境文件（尤其数据加密 key）和员工清单须在受控位置加密备份，不随代码或验收包分享。etcd 损坏时可在空配置存储上，从同一仓库启动并用原私有环境和清单依次 `apply-users`、`apply-live`、`apply-audit` 重建本项目资源；恢复不会自动恢复已丢失的本地计数。
+
+ClickHouse 数据备份在维护窗口先停本项目 `clickhouse` 服务，对命名卷 `tikhub-gateway_clickhouse_data` 做一致性冷备份，然后启动并执行 `health --probe`。恢复时在相同版本空实例上还原卷，并保留原环境凭据。环境/员工清单与数据卷一起做演练，不能只备份 Git。
+
+修改 Compose 内嵌配置、XML、SQL 或其他文件型配置后需要显式重建对应服务（`up -d --force-recreate --wait <服务>`），Compose 不保证依据文件内容自动重启。初始化 SQL 只在首次建库执行，后续表结构变更需代码化迁移并单独验收。
+
+变更从仓库提交、同步后部署；不在服务器手改 YAML、Lua 或 SQL。基础设施通过 Compose 编排，动态策略由仓库 CLI 调用 Admin API；员工清单是运行时数据。APISIX Dashboard 仅排查使用，正式策略变更回到 CLI/代码，避免配置漂移。
+
+官方参考：[APISIX Dashboard](https://apisix.apache.org/docs/apisix/dashboard/)、[key-auth](https://apisix.apache.org/docs/apisix/plugins/key-auth/)、[proxy-rewrite](https://apisix.apache.org/docs/apisix/plugins/proxy-rewrite/)、[limit-count](https://apisix.apache.org/docs/apisix/plugins/limit-count/)、[ClickHouse logger](https://apisix.apache.org/docs/apisix/plugins/clickhouse-logger/)、[TikHub 账户信息](https://docs.tikhub.io/186826050e0)、[官方 API 市场](https://user.tikhub.io/dashboard/api-marketplace)、[ClickHouse 25.8 LTS](https://clickhouse.com/blog/clickhouse-release-25-08)。

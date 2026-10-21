@@ -1,0 +1,28 @@
+<!--
+Licensed to the Apache Software Foundation (ASF) under one or more
+contributor license agreements. See the NOTICE file distributed with
+this work for additional information regarding copyright ownership.
+The ASF licenses this file to You under the Apache License, Version 2.0
+(the "License"); you may not use this file except in compliance with
+the License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<clickhouse>
+  <profiles><gateway_writer><readonly>0</readonly><log_queries>0</log_queries><max_threads>2</max_threads><max_memory_usage>268435456</max_memory_usage></gateway_writer></profiles>
+  <users>
+    <gateway_writer>
+      <password from_env="CLICKHOUSE_LOG_PASSWORD"/>
+      <networks><ip from_env="TIKHUB_NETWORK_SUBNET"/></networks>
+      <profile>gateway_writer</profile>
+      <quota>default</quota>
+      <grants><query>GRANT INSERT ON tikhub.gateway_access</query></grants>
+    </gateway_writer>
+  </users>
+</clickhouse>

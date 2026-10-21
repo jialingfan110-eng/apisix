@@ -63,6 +63,8 @@ services:
       etcd:
         condition: service_healthy
     environment:
+      CLICKHOUSE_LOG_PASSWORD: ${CLICKHOUSE_LOG_PASSWORD:?Initialize audit credentials}
+      TIKHUB_AUTHORIZATION: ${TIKHUB_AUTHORIZATION:-}
       APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:?Set APISIX_ADMIN_KEY in an external env file}
       APISIX_DATA_ENCRYPTION_KEY: ${APISIX_DATA_ENCRYPTION_KEY:?Set APISIX_DATA_ENCRYPTION_KEY in an external env file}
     configs:
@@ -70,7 +72,7 @@ services:
         target: /usr/local/apisix/conf/config.yaml
         mode: 0444
     ports:
-      - "${APISIX_LISTEN_IP:-127.0.0.1}:9080:9080"
+      - "${APISIX_LISTEN_IP:-0.0.0.0}:9080:9080"
       - "127.0.0.1:9180:9180"
     networks:
       - gateway
@@ -100,7 +102,67 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8@sha256:4ff0d6c199a9ebb906af75ae406496e8a96edd0187afdc16d51c0fb77ffca588
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 2g
+    environment:
+      TIKHUB_NETWORK_SUBNET: ${TIKHUB_NETWORK_SUBNET:-10.203.90.0/24}
+      CLICKHOUSE_USER: gateway_admin
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:?Initialize audit credentials}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      CLICKHOUSE_LOG_PASSWORD: ${CLICKHOUSE_LOG_PASSWORD:?Initialize audit credentials}
+    ports: ["127.0.0.1:8123:8123"]
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    configs:
+      - source: clickhouse_settings
+        target: /etc/clickhouse-server/config.d/gateway.xml
+      - source: clickhouse_users
+        target: /etc/clickhouse-server/users.d/gateway-writer.xml
+      - source: clickhouse_init
+        target: /docker-entrypoint-initdb.d/01-gateway.sql
+    networks: [gateway]
+    healthcheck:
+      test: [CMD-SHELL, 'clickhouse-client --user gateway_admin --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1" >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  mock:
+    image: apache/apisix:3.19.0-debian@sha256:5767cb637c584366bb932511d079ab87a38809ed7c5ce413e9a515ad85c8316f
+    platform: linux/amd64
+    profiles: [acceptance]
+    mem_limit: 128m
+    entrypoint: [/usr/local/openresty/bin/openresty]
+    command: [-e, /dev/stderr, -c, /etc/nginx/mock.conf, -g, "daemon off;"]
+    configs:
+      - source: mock_config
+        target: /etc/nginx/mock.conf
+    networks: [gateway]
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
 configs:
+  clickhouse_settings:
+    file: ./clickhouse.xml
+  clickhouse_users:
+    file: ./clickhouse-users.xml
+  clickhouse_init:
+    file: ./clickhouse.sql
+  mock_config:
+    file: ./mock.conf
   apisix_config:
     # Requires Docker Compose >= 2.23.1. No server-side YAML editing needed.
     # $$ escapes Compose interpolation, leaving APISIX/NGINX references intact.
@@ -115,6 +177,12 @@ configs:
           keyring:
             - "$${{APISIX_DATA_ENCRYPTION_KEY}}"
       nginx_config:
+        envs:
+          - TIKHUB_AUTHORIZATION
+          - CLICKHOUSE_LOG_PASSWORD
+        http_configuration_snippet: |
+          proxy_ssl_verify on;
+          proxy_ssl_verify_depth 5;
         worker_processes: 1
         error_log: /dev/stderr
         error_log_level: warn
@@ -154,3 +222,4 @@ networks:
 
 volumes:
   etcd_data:
+  clickhouse_data:
